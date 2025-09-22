@@ -1,0 +1,177 @@
+const { Resvg } = require('@resvg/resvg-js');
+const satori = require('satori');
+const { html } = require('satori-html');
+
+const font = fetch(
+  'https://fonts.gstatic.com/s/pressstart2p/v15/e3t4euO8T-267oIAQAu6jDQyK3nVivM.ttf'
+).then((res) => res.arrayBuffer());
+
+// --- Game Logic ---
+const GRID_SIZE = 20;
+const CANVAS_SIZE = 400;
+const TILE_SIZE = CANVAS_SIZE / GRID_SIZE;
+
+function getInitialState() {
+    return {
+        snake: [{ x: 10, y: 10 }],
+        food: { x: 15, y: 10 },
+        direction: 'right',
+        score: 0,
+        gameOver: false,
+    };
+}
+
+function updateGameState(state, buttonIndex) {
+    if (state.gameOver) {
+        if (buttonIndex === 1) return getInitialState();
+        return state;
+    }
+
+    // Update direction based on button press
+    const currentDirection = state.direction;
+    if (buttonIndex === 1 && currentDirection !== 'down') state.direction = 'up';
+    if (buttonIndex === 2 && currentDirection !== 'up') state.direction = 'down';
+    if (buttonIndex === 3 && currentDirection !== 'right') state.direction = 'left';
+    if (buttonIndex === 4 && currentDirection !== 'left') state.direction = 'right';
+
+    // Move snake
+    const head = { ...state.snake[0] };
+    switch (state.direction) {
+        case 'up': head.y--; break;
+        case 'down': head.y++; break;
+        case 'left': head.x--; break;
+        case 'right': head.x++; break;
+    }
+
+    // Check for collisions with wall
+    if (head.x < 0 || head.x >= GRID_SIZE || head.y < 0 || head.y >= GRID_SIZE) {
+        state.gameOver = true;
+        return state;
+    }
+
+    // Check for collisions with self
+    for (let i = 1; i < state.snake.length; i++) {
+        if (head.x === state.snake[i].x && head.y === state.snake[i].y) {
+            state.gameOver = true;
+            return state;
+        }
+    }
+
+    state.snake.unshift(head);
+
+    // Check for food
+    if (head.x === state.food.x && head.y === state.food.y) {
+        state.score++;
+        // Generate new food
+        state.food = {
+            x: Math.floor(Math.random() * GRID_SIZE),
+            y: Math.floor(Math.random() * GRID_SIZE),
+        };
+    } else {
+        state.snake.pop();
+    }
+
+    return state;
+}
+
+// --- Image Generation ---
+async function generateImage(state) {
+    const fontData = await font;
+    
+    const template = html`
+        <div style="display: flex; flex-direction: column; width: 100%; height: 100%; background-color: #111827; color: white; font-family: 'Press Start 2P'; align-items: center; justify-content: center;">
+            <div style="font-size: 24px; color: #10b981; margin-bottom: 10px;">ULAR FARCASTER</div>
+            <div style="position: relative; width: ${CANVAS_SIZE}px; height: ${CANVAS_SIZE}px; background-color: #000; border: 2px solid #374151;">
+                <!-- Draw Food -->
+                <div style="position: absolute; left: ${state.food.x * TILE_SIZE}px; top: ${state.food.y * TILE_SIZE}px; width: ${TILE_SIZE}px; height: ${TILE_SIZE}px; background-color: #facc15;"></div>
+                <!-- Draw Snake -->
+                ${state.snake.map((segment, index) => `
+                    <div style="position: absolute; left: ${segment.x * TILE_SIZE}px; top: ${segment.y * TILE_SIZE}px; width: ${TILE_SIZE - 1}px; height: ${TILE_SIZE - 1}px; background-color: ${index === 0 ? '#10b981' : '#34d399'};"></div>
+                `).join('')}
+                 ${state.gameOver ? `
+                    <div style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.7); display: flex; flex-direction: column; align-items: center; justify-content: center; color: #ef4444; font-size: 40px;">
+                        GAME OVER
+                        <span style="font-size: 20px; color: white; margin-top: 10px;">Skor: ${state.score}</span>
+                    </div>
+                ` : ''}
+            </div>
+            <div style="font-size: 18px; color: #facc15; margin-top: 10px;">SKOR: ${state.score}</div>
+        </div>
+    `;
+
+    const svg = await satori(template, {
+        width: 600,
+        height: 600,
+        fonts: [{ name: 'Press Start 2P', data: fontData, style: 'normal' }],
+    });
+    
+    const resvg = new Resvg(svg);
+    const pngData = resvg.render();
+    const pngBuffer = pngData.asPng();
+    
+    return `data:image/png;base64,${pngBuffer.toString('base64')}`;
+}
+
+
+// --- Server Handler ---
+export default async function handler(req, res) {
+    if (req.method === 'GET') {
+        const initialState = getInitialState();
+        const image = await generateImage(initialState);
+        const stateString = encodeURIComponent(JSON.stringify(initialState));
+
+        res.setHeader('Content-Type', 'text/html');
+        res.status(200).send(`
+            <!DOCTYPE html>
+            <html>
+                <head>
+                    <meta property="fc:frame" content="vNext" />
+                    <meta property="fc:frame:image" content="${image}" />
+                    <meta property="fc:frame:post_url" content="${process.env.VERCEL_URL}/api?state=${stateString}" />
+                    <meta property="fc:frame:button:1" content="↑" />
+                    <meta property="fc:frame:button:2" content="↓" />
+                    <meta property="fc:frame:button:3" content="←" />
+                    <meta property="fc:frame:button:4" content="→" />
+                    <meta property="og:image" content="${image}" />
+                </head>
+                <body><h1>Farcaster Snake Game</h1></body>
+            </html>
+        `);
+    } else if (req.method === 'POST') {
+        const { state: oldStateString } = req.query;
+        let state = JSON.parse(decodeURIComponent(oldStateString));
+        
+        // Farcaster sends POST request with a body
+        const body = await req.body;
+        const buttonIndex = body.untrustedData.buttonIndex;
+
+        let newState = updateGameState(state, buttonIndex);
+        const image = await generateImage(newState);
+        const newStateString = encodeURIComponent(JSON.stringify(newState));
+        
+        const button1Text = newState.gameOver ? 'Main Lagi' : '↑';
+
+        res.setHeader('Content-Type', 'text/html');
+        res.status(200).send(`
+            <!DOCTYPE html>
+            <html>
+                <head>
+                    <meta property="fc:frame" content="vNext" />
+                    <meta property="fc:frame:image" content="${image}" />
+                    <meta property="fc:frame:post_url" content="${process.env.VERCEL_URL}/api?state=${newStateString}" />
+                    <meta property="fc:frame:button:1" content="${button1Text}" />
+                    ${!newState.gameOver ? `
+                        <meta property="fc:frame:button:2" content="↓" />
+                        <meta property="fc:frame:button:3" content="←" />
+                        <meta property="fc:frame:button:4" content="→" />
+                    ` : ''}
+                    <meta property="og:image" content="${image}" />
+                </head>
+                <body><h1>Farcaster Snake Game</h1></body>
+            </html>
+        `);
+    } else {
+        res.setHeader('Allow', ['GET', 'POST']);
+        res.status(405).end(`Method ${req.method} Not Allowed`);
+    }
+}
